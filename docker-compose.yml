@@ -1,0 +1,21 @@
+version: "3.8"
+services:
+  infrahub:
+    build:
+      context: .
+      dockerfile: Dockerfile.infrahub
+      args:
+        - USER=dev
+        - UID=1000
+        - GID=1000
+        # override versions with build args if desired, e.g.
+        # - TERRAFORM_VERSION=1.6.0
+        # - INSTALL_DOCKERCLI=true
+    image: infrahub-sandbox:latest
+    volumes:
+      - ./workspace:/workspace:rw
+      - ~/.ssh:/home/dev/.ssh:ro
+    environment:
+      - TZ=UTC
+    tty: true
+    stdin_open: true

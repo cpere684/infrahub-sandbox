@@ -1,0 +1,102 @@
+# Dockerfile.infrahub
+# Extended Infrahub sandbox with commonly used infra/dev tools preinstalled.
+# Build args allow overriding versions or enabling/disabling large installs.
+
+FROM ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive TZ=UTC
+
+# Build-time arguments (change at build time with --build-arg)
+ARG USER=dev
+ARG UID=1000
+ARG GID=1000
+
+# Tool versions (override when building if desired)
+ARG TERRAFORM_VERSION=1.5.7
+ARG KUBECTL_CHANNEL=stable       # "stable" resolves to the stable release
+ARG HELM_VERSION=v3.12.0
+ARG NODE_SETUP_VERSION=18        # Node major version to install via NodeSource
+ARG INSTALL_DOCKERCLI=false      # static docker CLI (optional)
+ARG INSTALL_GOLANG=false         # optional go install
+
+# Minimal system packages + common dev tools
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+    ca-certificates curl wget gnupg lsb-release software-properties-common \
+    git unzip tar build-essential jq vim nano less locales procps \
+    python3 python3-pip python3-venv openssh-client iproute2 iputils-ping net-tools \
+ && rm -rf /var/lib/apt/lists/*
+
+# Create non-root user
+RUN groupadd --gid ${GID} ${USER} || true \
+ && useradd -m --uid ${UID} --gid ${GID} -s /bin/bash ${USER} \
+ && mkdir -p /home/${USER}/.ssh /workspace \
+ && chown -R ${USER}:${USER} /home/${USER} /workspace
+
+# Passwordless sudo for convenience (remove if you want stricter sandbox)
+RUN apt-get update && apt-get install -y --no-install-recommends sudo \
+ && rm -rf /var/lib/apt/lists/* \
+ && echo "${USER} ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/${USER} \
+ && chmod 0440 /etc/sudoers.d/${USER}
+
+# Python-based tools (ansible-core, awscli)
+RUN pip3 --no-cache-dir install --upgrade pip \
+ && pip3 --no-cache-dir install ansible-core awscli
+
+# GitHub CLI (gh) - install via apt repository
+RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg \
+ && chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg \
+ && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | tee /etc/apt/sources.list.d/github-cli.list > /dev/null \
+ && apt-get update && apt-get install -y --no-install-recommends gh \
+ && rm -rf /var/lib/apt/lists/*
+
+# kubectl (stable)
+RUN KUB_URL="https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl" \
+ && curl -fsSL "$KUB_URL" -o /usr/local/bin/kubectl \
+ && chmod +x /usr/local/bin/kubectl
+
+# helm (install script)
+RUN curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash -s -- --version ${HELM_VERSION}
+
+# terraform (HashiCorp binary)
+RUN TERRAFORM_ZIP="terraform_${TERRAFORM_VERSION}_linux_amd64.zip" \
+ && curl -fsSL "https://releases.hashicorp.com/terraform/${TERRAFORM_VERSION}/${TERRAFORM_ZIP}" -o /tmp/${TERRAFORM_ZIP} \
+ && unzip /tmp/${TERRAFORM_ZIP} -d /usr/local/bin \
+ && chmod +x /usr/local/bin/terraform \
+ && rm /tmp/${TERRAFORM_ZIP} || true
+
+# node (NodeSource)
+RUN curl -fsSL https://deb.nodesource.com/setup_${NODE_SETUP_VERSION}.x | bash - \
+ && apt-get update && apt-get install -y --no-install-recommends nodejs \
+ && rm -rf /var/lib/apt/lists/*
+
+# Optional: docker CLI (static) and Go (optional)
+RUN if [ "${INSTALL_DOCKERCLI}" = "true" ]; then \
+      curl -fsSL "https://download.docker.com/linux/static/stable/x86_64/docker-24.0.5.tgz" -o /tmp/docker.tgz && \
+      tar -xzf /tmp/docker.tgz --strip-components=1 -C /usr/local/bin docker/docker && \
+      rm /tmp/docker.tgz || true ; \
+    fi
+
+RUN if [ "${INSTALL_GOLANG}" = "true" ]; then \
+      GO_VER=1.20.5 && \
+      curl -fsSL "https://golang.org/dl/go${GO_VER}.linux-amd64.tar.gz" -o /tmp/go.tar.gz && \
+      tar -C /usr/local -xzf /tmp/go.tar.gz && rm /tmp/go.tar.gz ; \
+    fi
+
+# Small helpers and cleanup
+RUN ln -s /usr/bin/python3 /usr/bin/python || true
+
+# Copy login warning (prints on interactive shells)
+COPY sandbox-warning.sh /etc/profile.d/sandbox-warning.sh
+RUN chmod 644 /etc/profile.d/sandbox-warning.sh && chmod +x /etc/profile.d/sandbox-warning.sh \
+ && printf "\n# Source sandbox login warning for interactive shells\nif [ -f /etc/profile.d/sandbox-warning.sh ]; then . /etc/profile.d/sandbox-warning.sh; fi\n" >> /etc/bash.bashrc \
+ && sed -n '1,200p' /etc/profile.d/sandbox-warning.sh | sed '1,3d' > /etc/motd || true
+
+WORKDIR /workspace
+USER ${USER}
+ENV HOME=/home/${USER}
+
+VOLUME ["/workspace", "/home/${USER}/.ssh"]
+
+# Expose nothing by default; runs as interactive shell
+CMD ["bash"]

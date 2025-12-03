@@ -5,16 +5,20 @@ services:
       context: .
       dockerfile: Dockerfile.infrahub
       args:
-        - USER=dev
-        - UID=1000
-        - GID=1000
-        # override versions with build args if desired, e.g.
-        # - TERRAFORM_VERSION=1.6.0
-        # - INSTALL_DOCKERCLI=true
+        # Build-time args (can be set in an environment file or exported before running docker compose)
+        USER: ${SANDBOX_USER:-dev}
+        UID: ${LOCAL_UID:-1000}
+        GID: ${LOCAL_GID:-1000}
+        TERRAFORM_VERSION: ${TERRAFORM_VERSION:-1.5.7}
+        HELM_VERSION: ${HELM_VERSION:-v3.12.0}
+        NODE_SETUP_VERSION: ${NODE_SETUP_VERSION:-18}
+        INSTALL_DOCKERCLI: ${INSTALL_DOCKERCLI:-false}
+        INSTALL_GOLANG: ${INSTALL_GOLANG:-false}
     image: infrahub-sandbox:latest
+    container_name: infrahub
     volumes:
       - ./workspace:/workspace:rw
-      - ~/.ssh:/home/dev/.ssh:ro
+      - ${HOME}/.ssh:/home/${SANDBOX_USER:-dev}/.ssh:ro
     environment:
       - TZ=UTC
     tty: true

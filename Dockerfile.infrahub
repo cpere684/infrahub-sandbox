@@ -1,19 +1,19 @@
 # Dockerfile.infrahub
 # Extended Infrahub sandbox with commonly used infra/dev tools preinstalled.
-# Build args allow overriding versions or enabling/disabling large installs.
+# Robust user/group creation: choose a non-colliding UID/GID by scanning upward
+# from the requested default so builds work with base images that already have 1000/1000.
 
 FROM ubuntu:24.04
 
 ENV DEBIAN_FRONTEND=noninteractive TZ=UTC
 
-# Build-time arguments (change at build time with --build-arg)
+# Build-time arguments (can override with --build-arg)
 ARG USER=dev
 ARG UID=1000
 ARG GID=1000
 
 # Tool versions (override when building if desired)
 ARG TERRAFORM_VERSION=1.5.7
-ARG KUBECTL_CHANNEL=stable       # "stable" resolves to the stable release
 ARG HELM_VERSION=v3.12.0
 ARG NODE_SETUP_VERSION=18        # Node major version to install via NodeSource
 ARG INSTALL_DOCKERCLI=false      # static docker CLI (optional)
@@ -23,25 +23,62 @@ ARG INSTALL_GOLANG=false         # optional go install
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
     ca-certificates curl wget gnupg lsb-release software-properties-common \
-    git unzip tar build-essential jq vim nano less locales procps \
-    python3 python3-pip python3-venv openssh-client iproute2 iputils-ping net-tools \
+    git unzip zip tar build-essential jq vim nano less locales procps \
+    python3 python3-pip python3-venv pipx openssh-client iproute2 iputils-ping net-tools \
+    iptables nftables sudo unzip \
  && rm -rf /var/lib/apt/lists/*
 
-# Create non-root user
-RUN groupadd --gid ${GID} ${USER} || true \
- && useradd -m --uid ${UID} --gid ${GID} -s /bin/bash ${USER} \
- && mkdir -p /home/${USER}/.ssh /workspace \
- && chown -R ${USER}:${USER} /home/${USER} /workspace
+# Robust user/group creation: scan forward from requested UID/GID until free values are found.
+# This avoids collisions with the base image having UID/GID 1000 already.
+RUN set -eux; \
+    START_UID="${UID}"; START_GID="${GID}"; \
+    # find a free GID (scan upward)
+    GID_CAND=$START_GID; \
+    while getent group "$GID_CAND" > /dev/null 2>&1; do \
+      GID_CAND=$((GID_CAND + 1)); \
+      if [ "$GID_CAND" -gt 65535 ]; then echo "no free GID found"; exit 1; fi; \
+    done; \
+    # If the chosen GID already had an existing group name reuse it otherwise create a new group with the requested USER name
+    if getent group "$START_GID" > /dev/null 2>&1; then \
+      # prefer the existing group at START_GID if present (preserves host mapping semantics)
+      GID_USE=$START_GID; GROUP_NAME=$(getent group "$START_GID" | cut -d: -f1); \
+      echo "Using existing group '${GROUP_NAME}' with GID ${GID_USE}"; \
+    else \
+      GID_USE=$GID_CAND; GROUP_NAME="${USER}"; \
+      groupadd --gid "${GID_USE}" "${GROUP_NAME}"; \
+      echo "Created group '${GROUP_NAME}' with GID ${GID_USE}"; \
+    fi; \
+    # find a free UID (scan upward)
+    UID_CAND=$START_UID; \
+    while getent passwd "$UID_CAND" > /dev/null 2>&1; do \
+      UID_CAND=$((UID_CAND + 1)); \
+      if [ "$UID_CAND" -gt 65535 ]; then echo "no free UID found"; exit 1; fi; \
+    done; \
+    # create user with chosen UID/GID (if START_UID free use it, otherwise use UID_CAND)
+    if getent passwd "$START_UID" > /dev/null 2>&1; then \
+      UID_USE=$UID_CAND; \
+      useradd -m --uid "${UID_USE}" --gid "${GID_USE}" -s /bin/bash "${USER}"; \
+      echo "UID ${START_UID} exists; created user '${USER}' with UID ${UID_USE} and GID ${GID_USE}"; \
+    else \
+      UID_USE=$START_UID; \
+      useradd -m --uid "${UID_USE}" --gid "${GID_USE}" -s /bin/bash "${USER}"; \
+      echo "Created user '${USER}' with UID ${UID_USE} and GID ${GID_USE}"; \
+    fi; \
+    # ensure home and workspace exist and are owned by the created user
+    mkdir -p "/home/${USER}/.ssh" /workspace; \
+    chown -R "${UID_USE}:${GID_USE}" "/home/${USER}" /workspace
 
 # Passwordless sudo for convenience (remove if you want stricter sandbox)
-RUN apt-get update && apt-get install -y --no-install-recommends sudo \
- && rm -rf /var/lib/apt/lists/* \
- && echo "${USER} ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/${USER} \
+RUN echo "${USER} ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/${USER} \
  && chmod 0440 /etc/sudoers.d/${USER}
 
-# Python-based tools (ansible-core, awscli)
-RUN pip3 --no-cache-dir install --upgrade pip \
- && pip3 --no-cache-dir install ansible-core awscli
+# Use pipx (system package) to install ansible-core and awscli in isolated venvs,
+# placing shims into /usr/local/bin so binaries are available system-wide.
+RUN set -eux; \
+    mkdir -p /opt/pipx /usr/local/bin; \
+    export PIPX_HOME=/opt/pipx PIPX_BIN_DIR=/usr/local/bin; \
+    /usr/bin/pipx install --pip-args="--no-cache-dir" ansible-core || true; \
+    /usr/bin/pipx install --pip-args="--no-cache-dir" awscli || true
 
 # GitHub CLI (gh) - install via apt repository
 RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg \
